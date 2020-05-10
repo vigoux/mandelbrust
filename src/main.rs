@@ -1,26 +1,28 @@
 use crossbeam_channel::unbounded;
 use image::{ImageBuffer, ImageFormat, RgbImage};
 use num_complex::Complex64;
-use std::sync::mpsc::channel;
-use std::thread;
-use structopt::StructOpt;
-use std::path::PathBuf;
 use std::num::ParseFloatError;
+use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::mpsc::channel;
+use std::sync::Arc;
+use std::sync::RwLock;
+use std::thread;
+use std::time::Duration;
+use structopt::StructOpt;
 
-const BLACK_RGB: image::Rgb<u8> = image::Rgb([0, 0, 0]);
+const BLACK_RGB: image::Rgb<u8> = image::Rgb([255, 0, 0]);
 
 /// Mandelbrot set image generator.
 #[derive(StructOpt, Debug)]
-#[structopt(name="mandelbrust")]
+#[structopt(name = "mandelbrust")]
 struct Opt {
-
 	/// Path of the output file
 	#[structopt(name = "FILE", parse(from_os_str))]
 	file: PathBuf,
 
 	/// Iteration limit, used to determine wether a point converges.
-	#[structopt(short="l", long, default_value = "500")]
+	#[structopt(short = "l", long, default_value = "500")]
 	iter_limit: u64,
 
 	/// width of the generated image.
@@ -50,11 +52,9 @@ enum ImgChange {
 }
 
 fn parse_complex(s: &str) -> Result<Complex64, ParseFloatError> {
-
 	if let Some(div) = s.find(',') {
-
 		let re = f64::from_str(&s[..div])?;
-		let im = f64::from_str(&s[div+1..])?;
+		let im = f64::from_str(&s[div + 1..])?;
 		Ok(Complex64 { re, im })
 	} else {
 		Ok(Complex64::new(2., 2.))
@@ -82,20 +82,22 @@ fn main() {
 
 	let top_left = opt.center + Complex64::new(opt.span, opt.span);
 	let bot_right = opt.center + Complex64::new(-opt.span, -opt.span);
+	let active_count = Arc::new(RwLock::new(0));
 
 	work_tx
-		.send(Some(Task {
+		.send(Task {
 			start_x: 0,
 			start_y: 0,
-			stop_x: opt.width,
-			stop_y: opt.height,
+			stop_x: opt.width - 1,
+			stop_y: opt.height - 1,
 			top_left,
 			bot_right,
 			glob_width: opt.width,
 			glob_height: opt.height,
-			iter_limit: opt.iter_limit
-		}))
+			iter_limit: opt.iter_limit,
+		})
 		.unwrap();
+	*(active_count.write().unwrap()) += 1;
 
 	// let work = Arc::new(Mutex::new(work));
 
@@ -105,8 +107,19 @@ fn main() {
 		let w_tx = work_tx.clone();
 		let w_rx = work_rx.clone();
 		let out = img_tx.clone();
-		threads.push(thread::spawn(move || {
-			while let Some(task) = w_rx.recv().unwrap() {
+		let active_count = Arc::clone(&active_count);
+		threads.push(thread::spawn(move || loop {
+			let job;
+			{
+				let count = active_count.read().unwrap();
+				if *count == 0 {
+					break;
+				} else {
+					job = w_rx.try_recv();
+				}
+			}
+
+			if let Ok(task) = job {
 				let start_x = task.start_x;
 				let start_y = task.start_y;
 				let stop_x = task.stop_x;
@@ -116,11 +129,11 @@ fn main() {
 
 				out.send(modification).unwrap();
 
-				if let Some((t1, t2, t3, t4)) = subtasks {
-					w_tx.send(Some(t1)).unwrap();
-					w_tx.send(Some(t2)).unwrap();
-					w_tx.send(Some(t3)).unwrap();
-					w_tx.send(Some(t4)).unwrap();
+				if let Some(subtasks) = subtasks {
+					for task in subtasks {
+						w_tx.send(task).unwrap();
+						*(active_count.write().unwrap()) += 1;
+					}
 				} else {
 					out.send(ImgChange::Fill(
 						start_x + 1,
@@ -130,42 +143,43 @@ fn main() {
 					))
 					.unwrap();
 				}
+				*(active_count.write().unwrap()) -= 1;
+			} else {
+				thread::sleep(Duration::new(0, 10_000_000))
 			}
 		}));
 	}
 
-	let mut pixels_drawn: u64 = 0;
-
-	while pixels_drawn < (opt.width as u64 * opt.height as u64) {
-		match img_rx.recv().unwrap() {
-			ImgChange::Changes(changes) => {
+	loop {
+		match img_rx.try_recv() {
+			Ok(ImgChange::Changes(changes)) => {
 				for (x, y, _color) in changes {
 					let image::Rgb(color) = img.get_pixel(x, y);
-					let new_color = image::Rgb([ color[0]+30, color[0]+30, color[0]+30 ]);
-
-					if color[0] == 0 {
-						pixels_drawn += 1;
-					}
+					let new_color = image::Rgb([color[0] + 30, color[0] + 30, color[0] + 30]);
 					img.put_pixel(x, y, new_color);
 				}
 			}
-			ImgChange::Fill(start_x, start_y, stop_x, stop_y) => {
-				for i in start_x..stop_x {
-					for j in start_y..stop_y {
+			Ok(ImgChange::Fill(start_x, start_y, stop_x, stop_y)) => {
+				for i in start_x..stop_x + 1 {
+					for j in start_y..stop_y + 1 {
 						img.put_pixel(i, j, BLACK_RGB);
-						pixels_drawn += 1;
 					}
+				}
+			}
+			_ => {
+				if *(active_count.read().unwrap()) == 0 {
+					break;
+				} else {
+					thread::sleep(Duration::new(0, 10_000_000))
 				}
 			}
 		}
 	}
 
-	for _ in 0..opt.threads {
-		work_tx.send(None).unwrap();
-	}
 	for t in threads {
 		t.join().unwrap();
 	}
+
 	drop(work_rx);
 	drop(work_tx);
 	drop(img_rx);
@@ -174,58 +188,55 @@ fn main() {
 	img.save_with_format(opt.file, ImageFormat::Bmp).unwrap();
 }
 
-fn process_task(t: Task) -> (ImgChange, Option<(Task, Task, Task, Task)>) {
-	let mut top = compute_for_range(&t, t.start_x, t.stop_x, t.start_y, t.start_y + 1);
-	let mut right = compute_for_range(&t, t.stop_x - 1, t.stop_x, t.start_y + 1, t.stop_y);
-	let mut bot = compute_for_range(&t, t.start_x, t.stop_x - 1, t.stop_y - 1, t.stop_y);
-	let mut left = compute_for_range(&t, t.start_x, t.start_x + 1, t.start_y + 1, t.stop_y - 1);
-
-	let mut all_modifs = Vec::new();
-	all_modifs.append(&mut top.0);
-	all_modifs.append(&mut right.0);
-	all_modifs.append(&mut bot.0);
-	all_modifs.append(&mut left.0);
-
+fn process_task(t: Task) -> (ImgChange, Option<Vec<Task>>) {
 	// Compute surrouding rectangle
-	if top.1 || right.1 || bot.1 || left.1 {
+	let mut should_split = false;
+	let mut all_modifs = Vec::new();
+	let delta_x = t.stop_x - t.start_x;
+	let delta_y = t.stop_y - t.start_y;
+
+	if delta_x < 5 || delta_y < 5 {
+		let (changes, _) = compute_for_range(&t, t.start_x, t.stop_x, t.start_y, t.stop_y);
+		return (ImgChange::Changes(changes), Some(vec![]));
+	}
+
+	let bars = [
+		(t.start_x, t.stop_x, t.start_y, t.start_y),
+		(t.start_x, t.start_x, t.start_y + 1, t.stop_y),
+		(t.start_x + 1, t.stop_x, t.stop_y, t.stop_y),
+		(t.stop_x, t.stop_x, t.start_y + 1, t.stop_y - 1),
+	];
+
+	for &(start_x, stop_x, start_y, stop_y) in bars.iter() {
+		let (mut changes, split) = compute_for_range(&t, start_x, stop_x, start_y, stop_y);
+		all_modifs.append(&mut changes);
+		should_split |= split;
+	}
+
+	if should_split {
 		// We need to split
 		// TODO: Try to find a better spot to split at
-		let middle_x = (t.stop_x + t.start_x) / 2;
-		let middle_y = (t.stop_y + t.start_y) / 2;
+		let middle_x = (t.stop_x + t.start_x) >> 1;
+		let middle_y = (t.stop_y + t.start_y) >> 1;
 
-		let top_left = Task {
-			start_x: t.start_x + 1,
-			start_y: t.start_y + 1,
-			stop_x: middle_x,
-			stop_y: middle_y,
-			..t
-		};
+		let mut tasks: Vec<Task> = Vec::new();
+		let frames = [
+			(t.start_x + 1, middle_x, t.start_y + 1, middle_y),
+			(middle_x + 1, t.stop_x - 1, t.start_y + 1, middle_y),
+			(t.start_x + 1, middle_x, middle_y + 1, t.stop_y - 1),
+			(middle_x + 1, t.stop_x - 1, middle_y + 1, t.stop_y - 1),
+		];
 
-		let top_right = Task {
-			start_x: middle_x,
-			start_y: t.start_y + 1,
-			stop_x: t.stop_x - 1,
-			stop_y: middle_y,
-			..t
-		};
-		let bot_left = Task {
-			start_x: t.start_x + 1,
-			start_y: middle_y,
-			stop_x: middle_x,
-			stop_y: t.stop_y - 1,
-			..t
-		};
-		let bot_right = Task {
-			start_x: middle_x,
-			start_y: middle_y,
-			stop_x: t.stop_x - 1,
-			stop_y: t.stop_y - 1,
-			..t
-		};
-		(
-			ImgChange::Changes(all_modifs),
-			Some((top_left, top_right, bot_left, bot_right)),
-		)
+		for &(start_x, stop_x, start_y, stop_y) in frames.iter() {
+			tasks.push(Task {
+				start_x,
+				stop_x,
+				start_y,
+				stop_y,
+				..t
+			});
+		}
+		(ImgChange::Changes(all_modifs), Some(tasks))
 	} else {
 		(ImgChange::Changes(all_modifs), None)
 	}
@@ -240,8 +251,8 @@ fn compute_for_range<'a>(
 ) -> (Vec<(u32, u32, image::Rgb<u8>)>, bool) {
 	let mut should_split = false;
 	let mut returned: Vec<_> = Vec::new();
-	for i in start_x..stop_x {
-		for j in start_y..stop_y {
+	for i in start_x..stop_x + 1 {
+		for j in start_y..stop_y + 1 {
 			let c = complex_from_pos(t.top_left, t.bot_right, i, j, t.glob_width, t.glob_height);
 
 			if let Some(div) = divergent_iteration(c, t.iter_limit) {
@@ -249,7 +260,12 @@ fn compute_for_range<'a>(
 				returned.push((
 					i,
 					j,
-					image::Rgb(gradient([139, 233, 253], [68, 71, 90], div, t.iter_limit / 10)),
+					image::Rgb(gradient(
+						[139, 233, 253],
+						[68, 71, 90],
+						div,
+						t.iter_limit / 10,
+					)),
 				));
 			} else {
 				returned.push((i, j, BLACK_RGB));
@@ -294,7 +310,7 @@ fn gradient(source: [u8; 3], dest: [u8; 3], index: u64, modulus: u64) -> [u8; 3]
 	let g_change = dest[1] as i16 - source[1] as i16;
 	let b_change = dest[2] as i16 - source[2] as i16;
 
-	let mut percent = 2. * (index % ( 2 * modulus)) as f64 / (2 * modulus) as f64 - 1.;
+	let mut percent = 2. * (index % (2 * modulus)) as f64 / (2 * modulus) as f64 - 1.;
 	percent = percent * percent;
 
 	let r = source[0] as i16 + (r_change as f64 * percent) as i16;
