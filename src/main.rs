@@ -11,7 +11,7 @@ use std::thread;
 use std::time::Duration;
 use structopt::StructOpt;
 
-const BLACK_RGB: image::Rgb<u8> = image::Rgb([255, 0, 0]);
+const BLACK_RGB: image::Rgb<u8> = image::Rgb([40, 42, 54]);
 
 /// Mandelbrot set image generator.
 #[derive(StructOpt, Debug)]
@@ -44,6 +44,10 @@ struct Opt {
 	/// The span of the image
 	#[structopt(long, default_value = "2")]
 	span: f64,
+
+	/// Threshold where task splitting should not be triggered, should be above 5
+	#[structopt(long, default_value = "21")]
+	thresh: u32,
 }
 
 enum ImgChange {
@@ -72,6 +76,7 @@ struct Task {
 	glob_width: u32,
 	glob_height: u32,
 	iter_limit: u64,
+	divide_threshold: u32,
 }
 
 fn main() {
@@ -95,6 +100,7 @@ fn main() {
 			glob_width: opt.width,
 			glob_height: opt.height,
 			iter_limit: opt.iter_limit,
+			divide_threshold: if opt.thresh >= 5 { opt.thresh } else { 5 },
 		})
 		.unwrap();
 	*(active_count.write().unwrap()) += 1;
@@ -195,7 +201,7 @@ fn process_task(t: Task) -> (ImgChange, Option<Vec<Task>>) {
 	let delta_x = t.stop_x - t.start_x;
 	let delta_y = t.stop_y - t.start_y;
 
-	if delta_x < 5 || delta_y < 5 {
+	if delta_x < t.divide_threshold || delta_y < t.divide_threshold {
 		let (changes, _) = compute_for_range(&t, t.start_x, t.stop_x, t.start_y, t.stop_y);
 		return (ImgChange::Changes(changes), Some(vec![]));
 	}
