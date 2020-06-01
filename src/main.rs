@@ -51,7 +51,7 @@ struct Opt {
 }
 
 enum ImgChange {
-	Changes(Vec<(u32, u32, image::Rgb<u8>)>),
+	Changes(Vec<(u32, u32, Option<u64>)>),
 	Fill(u32, u32, u32, u32),
 }
 
@@ -159,10 +159,21 @@ fn main() {
 	loop {
 		match img_rx.try_recv() {
 			Ok(ImgChange::Changes(changes)) => {
-				for (x, y, _color) in changes {
-					let image::Rgb(color) = img.get_pixel(x, y);
-					let new_color = image::Rgb([color[0] + 30, color[0] + 30, color[0] + 30]);
-					img.put_pixel(x, y, new_color);
+				for (x, y, color) in changes {
+					if let Some(div) = color {
+						img.put_pixel(
+							x,
+							y,
+							image::Rgb(gradient(
+								[139, 233, 253],
+								[68, 71, 90],
+								div,
+								opt.iter_limit / 10,
+							)),
+						);
+					} else {
+						img.put_pixel(x, y, BLACK_RGB);
+					}
 				}
 			}
 			Ok(ImgChange::Fill(start_x, start_y, stop_x, stop_y)) => {
@@ -254,28 +265,17 @@ fn compute_for_range<'a>(
 	stop_x: u32,
 	start_y: u32,
 	stop_y: u32,
-) -> (Vec<(u32, u32, image::Rgb<u8>)>, bool) {
+) -> (Vec<(u32, u32, Option<u64>)>, bool) {
 	let mut should_split = false;
 	let mut returned: Vec<_> = Vec::new();
 	for i in start_x..stop_x + 1 {
 		for j in start_y..stop_y + 1 {
 			let c = complex_from_pos(t.top_left, t.bot_right, i, j, t.glob_width, t.glob_height);
 
-			if let Some(div) = divergent_iteration(c, t.iter_limit) {
-				should_split = true;
-				returned.push((
-					i,
-					j,
-					image::Rgb(gradient(
-						[139, 233, 253],
-						[68, 71, 90],
-						div,
-						t.iter_limit / 10,
-					)),
-				));
-			} else {
-				returned.push((i, j, BLACK_RGB));
-			}
+			let div = divergent_iteration(c, t.iter_limit);
+			returned.push((i, j, div));
+
+			should_split |= div.is_some();
 		}
 	}
 
