@@ -35,8 +35,8 @@ struct Opt {
     height: u32,
 
     /// Number of threads to use.
-    #[structopt(long, default_value = "4")]
-    threads: usize,
+    #[structopt(long)]
+    threads: Option<usize>,
 
     /// The center of the image
     #[structopt(long, default_value = "0,0", parse(try_from_str=parse_complex))]
@@ -49,11 +49,19 @@ struct Opt {
     /// Threshold where task splitting should not be triggered, should be above 5
     #[structopt(long, default_value = "21")]
     thresh: u32,
+
+    #[structopt(long)]
+    bars: bool,
 }
 
 enum ImgChange {
     Changes(Vec<(u32, u32, Option<u64>)>),
-    Fill(u32, u32, u32, u32),
+    Fill {
+        start_x: u32,
+        start_y: u32,
+        stop_x: u32,
+        stop_y: u32,
+    },
 }
 
 fn parse_complex(s: &str) -> Result<Complex64, ParseFloatError> {
@@ -106,11 +114,9 @@ fn main() {
         .unwrap();
     *(active_count.write().unwrap()) += 1;
 
-    // let work = Arc::new(Mutex::new(work));
-
     let mut threads: Vec<_> = vec![];
 
-    for _ in 0..opt.threads {
+    for _ in 0..opt.threads.unwrap_or(num_cpus::get()) {
         let w_tx = work_tx.clone();
         let w_rx = work_rx.clone();
         let out = img_tx.clone();
@@ -142,12 +148,12 @@ fn main() {
                         *(active_count.write().unwrap()) += 1;
                     }
                 } else {
-                    out.send(ImgChange::Fill(
-                        start_x + 1,
-                        start_y + 1,
-                        stop_x - 1,
-                        stop_y - 1,
-                    ))
+                    out.send(ImgChange::Fill {
+                        start_x: start_x + 1,
+                        start_y: start_y + 1,
+                        stop_x: stop_x - 1,
+                        stop_y: stop_y - 1,
+                    })
                     .unwrap();
                 }
                 *(active_count.write().unwrap()) -= 1;
@@ -161,23 +167,32 @@ fn main() {
         match img_rx.try_recv() {
             Ok(ImgChange::Changes(changes)) => {
                 for (x, y, color) in changes {
-                    if let Some(div) = color {
-                        img.put_pixel(
-                            x,
-                            y,
-                            image::Rgb(gradient(
-                                &[68, 71, 90],
-                                &[139, 233, 253],
-                                div,
-                                opt.iter_limit / 10,
-                            )),
-                        );
+                    if opt.bars {
+                        img.put_pixel(x, y, image::Rgb([255, 255, 255]));
                     } else {
-                        img.put_pixel(x, y, BLACK_RGB);
+                        if let Some(div) = color {
+                            img.put_pixel(
+                                x,
+                                y,
+                                image::Rgb(gradient(
+                                    &[68, 71, 90],
+                                    &[139, 233, 253],
+                                    div,
+                                    opt.iter_limit / 10,
+                                )),
+                            );
+                        } else {
+                            img.put_pixel(x, y, BLACK_RGB);
+                        }
                     }
                 }
             }
-            Ok(ImgChange::Fill(start_x, start_y, stop_x, stop_y)) => {
+            Ok(ImgChange::Fill {
+                start_x,
+                start_y,
+                stop_x,
+                stop_y,
+            }) => {
                 for i in start_x..stop_x + 1 {
                     for j in start_y..stop_y + 1 {
                         img.put_pixel(i, j, BLACK_RGB);
@@ -206,7 +221,7 @@ fn main() {
     img.save_with_format(opt.file, ImageFormat::Bmp).unwrap();
 }
 
-fn process_task(t: Task) -> (ImgChange, Option<Vec<Task>>) {
+fn process_task(t: Task) -> (ImgChange, Option<[Task; 4]>) {
     // Compute surrouding rectangle
     let mut should_split = false;
     let mut all_modifs = Vec::new();
@@ -215,7 +230,7 @@ fn process_task(t: Task) -> (ImgChange, Option<Vec<Task>>) {
 
     if delta_x < t.divide_threshold || delta_y < t.divide_threshold {
         let (changes, _) = compute_for_range(&t, t.start_x, t.stop_x, t.start_y, t.stop_y);
-        return (ImgChange::Changes(changes), Some(vec![]));
+        return (ImgChange::Changes(changes), None);
     }
 
     let bars = [
@@ -237,24 +252,13 @@ fn process_task(t: Task) -> (ImgChange, Option<Vec<Task>>) {
         let middle_x = (t.stop_x + t.start_x) >> 1;
         let middle_y = (t.stop_y + t.start_y) >> 1;
 
-        let mut tasks: Vec<Task> = Vec::new();
         let frames = [
-            (t.start_x + 1, middle_x, t.start_y + 1, middle_y),
-            (middle_x + 1, t.stop_x - 1, t.start_y + 1, middle_y),
-            (t.start_x + 1, middle_x, middle_y + 1, t.stop_y - 1),
-            (middle_x + 1, t.stop_x - 1, middle_y + 1, t.stop_y - 1),
+            Task { start_x: t.start_x + 1, stop_x: middle_x, start_y: t.start_y + 1, stop_y: middle_y, ..t },
+            Task { start_x: middle_x + 1, stop_x: t.stop_x - 1, start_y: t.start_y + 1, stop_y: middle_y, ..t },
+            Task { start_x: t.start_x + 1, stop_x: middle_x, start_y: middle_y + 1, stop_y: t.stop_y - 1, ..t },
+            Task { start_x: middle_x + 1, stop_x: t.stop_x - 1, start_y: middle_y + 1, stop_y: t.stop_y - 1, ..t }
         ];
-
-        for &(start_x, stop_x, start_y, stop_y) in frames.iter() {
-            tasks.push(Task {
-                start_x,
-                stop_x,
-                start_y,
-                stop_y,
-                ..t
-            });
-        }
-        (ImgChange::Changes(all_modifs), Some(tasks))
+        (ImgChange::Changes(all_modifs), Some(frames))
     } else {
         (ImgChange::Changes(all_modifs), None)
     }
@@ -268,12 +272,13 @@ fn compute_for_range<'a>(
     stop_y: u32,
 ) -> (Vec<(u32, u32, Option<u64>)>, bool) {
     let mut should_split = false;
-    let mut returned: Vec<_> = Vec::new();
+    let mut returned: Vec<_> =
+        Vec::with_capacity(((stop_x - start_x + 1) * (stop_y - start_y + 1)) as usize);
     for i in start_x..stop_x + 1 {
         for j in start_y..stop_y + 1 {
-            let c = complex_from_pos(t.top_left, t.bot_right, i, j, t.glob_width, t.glob_height);
+            let c = complex_from_pos(&t.top_left, &t.bot_right, i, j, t.glob_width, t.glob_height);
 
-            let div = divergent_iteration(c, t.iter_limit);
+            let div = divergent_iteration(&c, t.iter_limit);
             returned.push((i, j, div));
 
             should_split |= div.is_some();
@@ -284,8 +289,8 @@ fn compute_for_range<'a>(
 }
 
 fn complex_from_pos(
-    top_left: Complex64,
-    bot_right: Complex64,
+    top_left: &Complex64,
+    bot_right: &Complex64,
     i: u32,
     j: u32,
     width: u32,
@@ -299,8 +304,8 @@ fn complex_from_pos(
     Complex64::new(bot_right.re + x, bot_right.im + y)
 }
 
-fn divergent_iteration(c: Complex64, limit: u64) -> Option<u64> {
-    let mut z: Complex64 = c;
+fn divergent_iteration(c: &Complex64, limit: u64) -> Option<u64> {
+    let mut z: Complex64 = *c;
     let mut i = 0;
 
     while z.norm_sqr() < 4.0 && i < limit {
