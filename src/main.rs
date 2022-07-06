@@ -300,16 +300,19 @@ fn complex_from_pos(
 }
 
 fn divergent_iteration(c: Complex64, limit: u64) -> Option<u64> {
-    let mut z: Complex64 = Complex64::new(0., 0.);
-    for i in 0..limit {
-        z = z * z + c;
+    let mut z: Complex64 = c;
+    let mut i = 0;
 
-        if z.norm_sqr() > 4.0 {
-            return Some(i);
-        }
+    while z.norm_sqr() < 4.0 && i < limit {
+        i += 1;
+        z = z * z + c;
     }
 
-    None
+    if i < limit {
+        Some(i)
+    } else {
+        None
+    }
 }
 
 fn gradient(source: &[u8; 3], dest: &[u8; 3], iter_count: u64, modulus: u64) -> [u8; 3] {
