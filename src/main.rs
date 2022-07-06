@@ -1,3 +1,4 @@
+#![feature(int_log)]
 use crossbeam_channel::unbounded;
 use image::{ImageBuffer, ImageFormat, RgbImage};
 use num_complex::Complex64;
@@ -165,8 +166,8 @@ fn main() {
                             x,
                             y,
                             image::Rgb(gradient(
-                                [139, 233, 253],
-                                [68, 71, 90],
+                                &[68, 71, 90],
+                                &[139, 233, 253],
                                 div,
                                 opt.iter_limit / 10,
                             )),
@@ -311,13 +312,16 @@ fn divergent_iteration(c: Complex64, limit: u64) -> Option<u64> {
     None
 }
 
-fn gradient(source: [u8; 3], dest: [u8; 3], index: u64, modulus: u64) -> [u8; 3] {
+fn gradient(source: &[u8; 3], dest: &[u8; 3], iter_count: u64, modulus: u64) -> [u8; 3] {
     let r_change = dest[0] as i16 - source[0] as i16;
     let g_change = dest[1] as i16 - source[1] as i16;
     let b_change = dest[2] as i16 - source[2] as i16;
 
-    let mut percent = 2. * (index % (2 * modulus)) as f64 / (2 * modulus) as f64 - 1.;
-    percent = percent * percent;
+    if iter_count == 0 {
+        return source.to_owned();
+    }
+
+    let percent = (((iter_count.log2() as u64) % modulus) as f64) / (modulus as f64);
 
     let r = source[0] as i16 + (r_change as f64 * percent) as i16;
     let g = source[1] as i16 + (g_change as f64 * percent) as i16;
