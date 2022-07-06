@@ -88,6 +88,12 @@ struct Task {
     divide_threshold: u32,
 }
 
+enum SubtaskMarker {
+    Divide([Task; 4]),
+    Complete,
+    Nothing,
+}
+
 fn main() {
     let opt = Opt::from_args();
     let mut img: RgbImage = ImageBuffer::new(opt.width, opt.height);
@@ -121,11 +127,11 @@ fn main() {
         let w_tx = work_tx.clone();
         let w_rx = work_rx.clone();
         let out = img_tx.clone();
-        let active_count = Arc::clone(&active_count);
+        let task_count = Arc::clone(&active_count);
         threads.push(thread::spawn(move || loop {
             let job;
             {
-                let count = active_count.read().unwrap();
+                let count = task_count.read().unwrap();
                 if *count == 0 {
                     break;
                 } else {
@@ -143,21 +149,26 @@ fn main() {
 
                 out.send(modification).unwrap();
 
-                if let Some(subtasks) = subtasks {
-                    *(active_count.write().unwrap()) += 4;
-                    for task in subtasks {
-                        w_tx.send(task).unwrap();
+                match subtasks {
+                    SubtaskMarker::Nothing => {
+                        out.send(ImgChange::Fill {
+                            start_x: start_x + 1,
+                            start_y: start_y + 1,
+                            stop_x: stop_x - 1,
+                            stop_y: stop_y - 1,
+                        })
+                        .unwrap();
                     }
-                } else {
-                    out.send(ImgChange::Fill {
-                        start_x: start_x + 1,
-                        start_y: start_y + 1,
-                        stop_x: stop_x - 1,
-                        stop_y: stop_y - 1,
-                    })
-                    .unwrap();
+                    SubtaskMarker::Divide(sub) => {
+                        *(task_count.write().unwrap()) += 4;
+                        for task in sub {
+                            w_tx.send(task).unwrap();
+                        }
+                    }
+                    SubtaskMarker::Complete => {}
                 }
-                *(active_count.write().unwrap()) -= 1;
+
+                *(task_count.write().unwrap()) -= 1;
             } else {
                 thread::sleep(Duration::new(0, 10_000_000))
             }
@@ -222,7 +233,7 @@ fn main() {
     img.save_with_format(opt.file, ImageFormat::Bmp).unwrap();
 }
 
-fn process_task(t: Task) -> (ImgChange, Option<[Task; 4]>) {
+fn process_task(t: Task) -> (ImgChange, SubtaskMarker) {
     // Compute surrouding rectangle
     let mut should_split = false;
     let mut all_modifs = Vec::new();
@@ -231,7 +242,7 @@ fn process_task(t: Task) -> (ImgChange, Option<[Task; 4]>) {
 
     if delta_x < t.divide_threshold || delta_y < t.divide_threshold {
         let (changes, _) = compute_for_range(&t, t.start_x, t.stop_x, t.start_y, t.stop_y);
-        return (ImgChange::Changes(changes), None);
+        return (ImgChange::Changes(changes), SubtaskMarker::Complete);
     }
 
     let bars = [
@@ -254,14 +265,41 @@ fn process_task(t: Task) -> (ImgChange, Option<[Task; 4]>) {
         let middle_y = (t.stop_y + t.start_y) >> 1;
 
         let frames = [
-            Task { start_x: t.start_x + 1, stop_x: middle_x, start_y: t.start_y + 1, stop_y: middle_y, ..t },
-            Task { start_x: middle_x + 1, stop_x: t.stop_x - 1, start_y: t.start_y + 1, stop_y: middle_y, ..t },
-            Task { start_x: t.start_x + 1, stop_x: middle_x, start_y: middle_y + 1, stop_y: t.stop_y - 1, ..t },
-            Task { start_x: middle_x + 1, stop_x: t.stop_x - 1, start_y: middle_y + 1, stop_y: t.stop_y - 1, ..t }
+            Task {
+                start_x: t.start_x + 1,
+                stop_x: middle_x,
+                start_y: t.start_y + 1,
+                stop_y: middle_y,
+                ..t
+            },
+            Task {
+                start_x: middle_x + 1,
+                stop_x: t.stop_x - 1,
+                start_y: t.start_y + 1,
+                stop_y: middle_y,
+                ..t
+            },
+            Task {
+                start_x: t.start_x + 1,
+                stop_x: middle_x,
+                start_y: middle_y + 1,
+                stop_y: t.stop_y - 1,
+                ..t
+            },
+            Task {
+                start_x: middle_x + 1,
+                stop_x: t.stop_x - 1,
+                start_y: middle_y + 1,
+                stop_y: t.stop_y - 1,
+                ..t
+            },
         ];
-        (ImgChange::Changes(all_modifs), Some(frames))
+        (
+            ImgChange::Changes(all_modifs),
+            SubtaskMarker::Divide(frames),
+        )
     } else {
-        (ImgChange::Changes(all_modifs), None)
+        (ImgChange::Changes(all_modifs), SubtaskMarker::Nothing)
     }
 }
 
