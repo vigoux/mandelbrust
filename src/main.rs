@@ -90,7 +90,7 @@ struct Task {
 
 enum SubtaskMarker {
     Divide([Task; 4]),
-    Complete,
+    Done,
     Nothing,
 }
 
@@ -165,7 +165,7 @@ fn main() {
                             w_tx.send(task).unwrap();
                         }
                     }
-                    SubtaskMarker::Complete => {}
+                    SubtaskMarker::Done => {}
                 }
 
                 *(task_count.write().unwrap()) -= 1;
@@ -236,13 +236,12 @@ fn main() {
 fn process_task(t: Task) -> (ImgChange, SubtaskMarker) {
     // Compute surrouding rectangle
     let mut should_split = false;
-    let mut all_modifs = Vec::new();
     let delta_x = t.stop_x - t.start_x;
     let delta_y = t.stop_y - t.start_y;
 
     if delta_x < t.divide_threshold || delta_y < t.divide_threshold {
         let (changes, _) = compute_for_range(&t, t.start_x, t.stop_x, t.start_y, t.stop_y);
-        return (ImgChange::Changes(changes), SubtaskMarker::Complete);
+        return (ImgChange::Changes(changes), SubtaskMarker::Done);
     }
 
     let bars = [
@@ -251,6 +250,8 @@ fn process_task(t: Task) -> (ImgChange, SubtaskMarker) {
         (t.start_x + 1, t.stop_x, t.stop_y, t.stop_y),
         (t.stop_x, t.stop_x, t.start_y + 1, t.stop_y - 1),
     ];
+
+    let mut all_modifs = Vec::new();
 
     for &(start_x, stop_x, start_y, stop_y) in bars.iter() {
         let (mut changes, split) = compute_for_range(&t, start_x, stop_x, start_y, stop_y);
