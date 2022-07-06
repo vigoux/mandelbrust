@@ -94,8 +94,9 @@ fn main() {
     let (work_tx, work_rx) = unbounded();
     let (img_tx, img_rx) = channel();
 
-    let top_left = opt.center + Complex64::new(opt.span, opt.span);
-    let bot_right = opt.center + Complex64::new(-opt.span, -opt.span);
+    let span = Complex64::new(opt.span, opt.span);
+    let top_left = opt.center + span;
+    let bot_right = opt.center - span;
     let active_count = Arc::new(RwLock::new(0));
 
     work_tx
@@ -143,9 +144,9 @@ fn main() {
                 out.send(modification).unwrap();
 
                 if let Some(subtasks) = subtasks {
+                    *(active_count.write().unwrap()) += 4;
                     for task in subtasks {
                         w_tx.send(task).unwrap();
-                        *(active_count.write().unwrap()) += 1;
                     }
                 } else {
                     out.send(ImgChange::Fill {
