@@ -1,9 +1,11 @@
 #![feature(int_log)]
+#![feature(portable_simd)]
 use crossbeam_channel::unbounded;
 use image::{ImageBuffer, ImageFormat, RgbImage};
 use num_complex::Complex64;
 use std::num::ParseFloatError;
 use std::path::PathBuf;
+use std::simd::u64x4;
 use std::str::FromStr;
 use std::sync::mpsc::channel;
 use std::sync::Arc;
@@ -12,7 +14,11 @@ use std::thread;
 use std::time::Duration;
 use structopt::StructOpt;
 
+use cached::proc_macro::cached;
+
 const BLACK_RGB: image::Rgb<u8> = image::Rgb([40, 42, 54]);
+const SOURCE_COLOR: u64x4 = u64x4::from_array([68, 71, 90, 0]);
+const DEST_COLOR: u64x4 = u64x4::from_array([139, 233, 253, 0]);
 
 /// Mandelbrot set image generator.
 #[derive(StructOpt, Debug)]
@@ -28,11 +34,7 @@ struct Opt {
 
     /// width of the generated image.
     #[structopt(long, default_value = "500")]
-    width: u32,
-
-    /// height of the generated image.
-    #[structopt(long, default_value = "500")]
-    height: u32,
+    size: u32,
 
     /// Number of threads to use.
     #[structopt(long)]
@@ -82,8 +84,7 @@ struct Task {
     stop_y: u32,
     top_left: Complex64,
     bot_right: Complex64,
-    glob_width: u32,
-    glob_height: u32,
+    size: u32,
     iter_limit: u64,
     divide_threshold: u32,
 }
@@ -96,7 +97,7 @@ enum SubtaskMarker {
 
 fn main() {
     let opt = Opt::from_args();
-    let mut img: RgbImage = ImageBuffer::new(opt.width, opt.height);
+    let mut img: RgbImage = ImageBuffer::new(opt.size, opt.size);
     let (work_tx, work_rx) = unbounded();
     let (img_tx, img_rx) = channel();
 
@@ -109,12 +110,11 @@ fn main() {
         .send(Task {
             start_x: 0,
             start_y: 0,
-            stop_x: opt.width - 1,
-            stop_y: opt.height - 1,
+            stop_x: opt.size - 1,
+            stop_y: opt.size - 1,
             top_left,
             bot_right,
-            glob_width: opt.width,
-            glob_height: opt.height,
+            size: opt.size,
             iter_limit: opt.iter_limit,
             divide_threshold: if opt.thresh >= 5 { opt.thresh } else { 5 },
         })
@@ -183,16 +183,7 @@ fn main() {
                         img.put_pixel(x, y, image::Rgb([255, 255, 255]));
                     } else {
                         if let Some(div) = color {
-                            img.put_pixel(
-                                x,
-                                y,
-                                image::Rgb(gradient(
-                                    &[68, 71, 90],
-                                    &[139, 233, 253],
-                                    div,
-                                    opt.iter_limit / 10,
-                                )),
-                            );
+                            img.put_pixel(x, y, image::Rgb(gradient(div, opt.iter_limit >> 4)));
                         } else {
                             img.put_pixel(x, y, BLACK_RGB);
                         }
@@ -316,7 +307,7 @@ fn compute_for_range<'a>(
         Vec::with_capacity(((stop_x - start_x + 1) * (stop_y - start_y + 1)) as usize);
     for i in start_x..stop_x + 1 {
         for j in start_y..stop_y + 1 {
-            let c = complex_from_pos(&t.top_left, &t.bot_right, i, j, t.glob_width, t.glob_height);
+            let c = complex_from_pos(&t.top_left, &t.bot_right, i, j, t.size);
 
             let div = divergent_iteration(&c, t.iter_limit);
             returned.push((i, j, div));
@@ -333,13 +324,12 @@ fn complex_from_pos(
     bot_right: &Complex64,
     i: u32,
     j: u32,
-    width: u32,
-    height: u32,
+    size: u32,
 ) -> Complex64 {
     let x_range = top_left.re - bot_right.re;
     let y_range = top_left.im - bot_right.im;
-    let x = (i as f64 / width as f64) * x_range;
-    let y = (j as f64 / height as f64) * y_range;
+    let x = (i as f64 / size as f64) * x_range;
+    let y = (j as f64 / size as f64) * y_range;
 
     Complex64::new(bot_right.re + x, bot_right.im + y)
 }
@@ -360,20 +350,22 @@ fn divergent_iteration(c: &Complex64, limit: u64) -> Option<u64> {
     }
 }
 
-fn gradient(source: &[u8; 3], dest: &[u8; 3], iter_count: u64, modulus: u64) -> [u8; 3] {
-    let r_change = dest[0] as i16 - source[0] as i16;
-    let g_change = dest[1] as i16 - source[1] as i16;
-    let b_change = dest[2] as i16 - source[2] as i16;
+#[cached]
+fn gradient(iter_count: u64, modulus: u64) -> [u8; 3] {
+    let out: [u64; 4] = if iter_count == 0 {
+        SOURCE_COLOR.to_array()
+    } else {
+        let change = DEST_COLOR - SOURCE_COLOR;
+        let percent = iter_count.log2() as u64;
+        let percent_array = u64x4::from_array([percent; 4]);
+        let modulus_array = u64x4::from_array([modulus; 4]);
 
-    if iter_count == 0 {
-        return source.to_owned();
-    }
+        (SOURCE_COLOR + ((percent_array * change) / modulus_array)).to_array()
+    };
 
-    let percent = (((iter_count.log2() as u64) % modulus) as f64) / (modulus as f64);
-
-    let r = source[0] as i16 + (r_change as f64 * percent) as i16;
-    let g = source[1] as i16 + (g_change as f64 * percent) as i16;
-    let b = source[2] as i16 + (b_change as f64 * percent) as i16;
-
-    [r as u8, g as u8, b as u8]
+    return [
+        out[0].clamp(0, u8::MAX as u64) as u8,
+        out[1].clamp(0, u8::MAX as u64) as u8,
+        out[2].clamp(0, u8::MAX as u64) as u8,
+    ];
 }
