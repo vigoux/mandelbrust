@@ -129,21 +129,16 @@ fn main() {
         let out = img_tx.clone();
         let task_count = Arc::clone(&active_count);
         threads.push(thread::spawn(move || loop {
-            let job;
-            {
+            let job = {
                 let count = task_count.read().unwrap();
                 if *count == 0 {
                     break;
                 } else {
-                    job = w_rx.try_recv();
+                    w_rx.try_recv()
                 }
-            }
+            };
 
-            if let Ok(task) = job {
-                let start_x = task.start_x;
-                let start_y = task.start_y;
-                let stop_x = task.stop_x;
-                let stop_y = task.stop_y;
+            if let Ok(task@Task { start_x, start_y, stop_x, stop_y, .. }) = job {
 
                 let (modification, subtasks) = process_task(task);
 
